@@ -1,0 +1,7 @@
+sample	r1	r2	bam	peaks
+# One sample per line, tab-separated. Lines starting with # are ignored.
+# Fill a path in every column you have and write - in the columns you do not; absolute paths are recommended.
+# Example 1 (aligned reads already exist):
+#A	-	-	/path/A.dedup.bam	/path/A_peaks.narrowPeak
+# Example 2 (start from FASTQ; the pipeline maps and calls peaks for you):
+#B	/path/B_R1.fq.gz	/path/B_R2.fq.gz	-	-

@@ -1,169 +1,219 @@
-# ATACQuant
+# ATAC-Quant v4
 
-ATACQuant is a *k*-mer-based Bayesian expectation-maximization (EM) framework designed to precisely quantify subgenome-specific chromatin accessibility, effectively resolving the issue of multi-mapping data loss in polyploid ATAC-seq analyses.
+**Copy-resolved quantification of ATAC-seq and ChIP-seq in polyploids.**
 
-It resolves reads that multi-map across homeologous (syntenic) peak regions by combining:
-- **Topological anchoring** via GraphAllele allele clusters
-- **Dual-layer k-mer immune dictionaries** (transposon masking + genome uniqueness filtering)
-- **N-way lineage P-value scoring** from species-specific diagnostic k-mers
-- **Bayesian EM deconvolution** with physical length normalization
+A peak-based workflow that stops treating a polyploid genome as if every regulatory
+element existed once. For every consensus peak it builds a *Homeologous Regulatory
+Unit* (HRU) - the set of homeologous copies of that element - projects the peak onto
+each copy, and then allocates the ambiguous fragments to those copies by EM. The
+result is a count matrix indexed by **element x copy x sample** instead of
+**element x sample**, plus an explicit measure of how much of each count is
+unambiguous evidence.
 
-ATACQuant supports any number of subgenome species (N ≥ 2), making it applicable to allopolyploids of any ploidy level.
-
----
-
-## Pipeline Overview
-
-```
-ATAC-seq FASTQs
-      │
-      ▼
-[00] Bowtie2 alignment + Tn5 shift + MACS2 peak calling
-      │
-      ▼
-[01] Topological anchoring: assign peaks to GraphAllele syntenic clusters
-      │
-      ├─── Syntenic (multi-subgenome) peaks ──────────────────────────────┐
-      │                                                                    │
-      ▼                                                                    │
-[02] K-mer immune dictionary construction                                  │
-      │   (hard-masked FASTA → transposon filter → Bowtie2 uniqueness)    │
-      ▼                                                                    │
-[02b] K-mer FASTQ scan → per-peak prior theta (opening probability)       │
-      │                                                                    │
-      ▼                                                                    │
-[03] Per-read lineage P-value assignment                                   │
-      │   (species-specific k-mer FASTA libraries, N-way)                 │
-      ▼                                                                    │
-[04] Bayesian EM convergence                                               │
-      │   (fuses theta prior + read P-values + physical length)           │
-      └──────────────┬────────────────────────────────────────────────────┘
-                     │
-[05] Final count matrix assembly
-      │   (EM-deconvolved syntenic peaks + raw-counted lineage-specific peaks)
-      ▼
-[06] Local gene annotation via GraphAllele matrix
-      │
-      ▼
-     Final annotated count matrix (DESeq2-ready)
-```
+The pipeline is species-agnostic. Every threshold and every grouping comes from the
+files you supply; nothing about a particular organism is hard-coded.
 
 ---
 
-## Input Files
+## What problem it solves
 
-| Argument | Description |
-|---|---|
-| `--r1` / `--r2` | Cleaned paired-end FASTQ files |
-| `-f` / `--fasta` | Reference genome FASTA |
-| `-m` / `--masked` | Hard-masked reference genome FASTA (RepeatMasker output) |
-| `-g` / `--gff` | Genome annotation GFF3 |
-| `-c` / `--clusters` | GraphAllele `my_clusters.tsv` — allele cluster assignments |
-| `--matrix` | GraphAllele `PolyAlleler_Global_Matrix_Cleaned.tsv` |
-| `-a` / `--ancestry` | Gene ancestry mapping TSV (columns: Gene_ID, …, …, Ancestry_Label) |
-| `--kmers` | Species-specific diagnostic k-mer FASTA files, one per subgenome |
-| `--labels` | Short species labels corresponding to `--kmers` (must match Ancestry_Label values) |
+In a diploid, reads that align to several positions are a nuisance. In a polyploid
+they are the signal: reads from copy A of a gene look like reads from copy B, so plain
+counting collapses 10-14 real copies into one number and any statement about
+"subgenome dominance", "copy-specific accessibility" or "homeolog expression bias"
+rests on a number that never existed.
 
-### Ancestry mapping file format
+ATAC-Quant keeps them apart without pretending the ambiguity is gone:
 
-Tab-separated, with a header row. The **4th column** (index 3) must contain the ancestry label for each gene, and its values must **exactly match** the `--labels` you supply.
+- fragments that hit exactly one copy are counted as such (`N_Unique`);
+- fragments compatible with several copies are split by an EM over the equivalence
+  class, weighted by effective length;
+- every feature carries `Resolved_Frac`, the fraction of its count that is
+  undisputed - so a copy-level claim can be tiered by how much evidence is behind it.
 
-```
-Gene_ID    Col2    Col3    Ancestry_Label
-Gene0001   ...     ...     SP1
-Gene0002   ...     ...     SP2
-```
-
-### K-mer FASTA files
-
-Each file should contain species-specific diagnostic k-mers (e.g., produced by KmerGenoPhaser or similar). One sequence per entry; header lines are ignored. Only the first k bases of each sequence are used.
+EM results are mass-conserving: the sum over the copies of a group equals the number
+of fragments that entered it. That property is checked in the QC report, not assumed.
 
 ---
 
-## Usage
+## Requirements
 
 ```bash
-cd workflow/
-
-python ATACQuant.py \
-  --r1 /path/to/clean_R1.fq \
-  --r2 /path/to/clean_R2.fq \
-  -f /path/to/genome.fasta \
-  -m /path/to/genome.fasta.masked \
-  -g /path/to/genome.gff3 \
-  -c /path/to/my_clusters.tsv \
-  --matrix /path/to/PolyAlleler_Global_Matrix_Cleaned.tsv \
-  -a /path/to/Gene_Ancestry_Mapping.tsv \
-  --kmers /path/to/SP1_k15.fasta /path/to/SP2_k15.fasta /path/to/SP3_k15.fasta \
-  --labels SP1 SP2 SP3 \
-  -t 48 \
-  -k 15 \
-  --prefix SAMPLE_NAME \
-  -o /path/to/output_dir
+conda env create -f environment.yml      # python>=3.7 + numpy + pysam
+# mapping from FASTQ additionally needs: bowtie2, samtools, deeptools (alignmentSieve), MACS2
 ```
 
-See `workflow/run_ATACQuant.sh` for a ready-to-edit cluster submission template.
+Python 3.7+ with `numpy` and `pysam` is the hard requirement. The mapping tools are
+needed only when you start from FASTQ or ask the pipeline to call peaks.
 
-### Key parameters
+**Paired-end is mandatory for ChIP-seq** and strongly recommended for ATAC-seq: step 03
+infers fragment span from the TLEN field, which degenerates to read length for
+single-end data and silently corrupts every effective length.
 
-| Flag | Default | Description |
-|---|---|---|
-| `-k` / `--kmer` | `15` | K-mer length for lineage P-value scoring (step 03); must match your k-mer FASTA files |
-| `-t` / `--threads` | `48` | CPU threads for Bowtie2 / samtools |
-| `--prefix` | `sample` | Sample name used in output filenames and count matrix column header |
-| `-o` / `--outdir` | `workflow/ATACQuant_Out` | Output directory |
-| `--force` | off | Re-run from scratch, ignoring checkpoints |
-| `--up` | `3000` | TSS upstream window (bp) for peak anchoring |
-| `--down` | `1000` | TSS downstream window (bp) for peak anchoring |
-
----
-
-## Output Files
-
-All outputs are written to `--outdir`.
-
-| File | Description |
-|---|---|
-| `Syntenic_Peak_Clusters.tsv` | Peaks grouped into syntenic allele clusters |
-| `EM_Target_Peaks.saf` | SAF-format coordinates for syntenic peaks |
-| `Peak_Ancestry.txt` | Per-peak subgenome ancestry label |
-| `Lineage_Specific_Peaks.tsv` | Peaks unique to one subgenome (not deconvolved) |
-| `ATAC_Master_Immune_Dict.pkl` | Binary immune k-mer dictionary |
-| `Global_Theta_Matrix.tsv` | Prior opening probability (theta) per peak |
-| `Reads_P_values.tsv` | Per-read lineage likelihood scores |
-| `EM_Final_Expression.tsv` | EM-deconvolved read counts + density per peak |
-| `{prefix}_Final_Count_Matrix.tsv` | Merged count matrix (syntenic + lineage-specific) |
-| `{prefix}_Local_Annotated_Matrix.tsv` | Final matrix annotated with local gene IDs |
-
----
-
-## N-species Support
-
-ATACQuant generalizes to any number of subgenomes (N ≥ 2). Simply provide one k-mer FASTA and one label per subgenome:
+Self-test (1-3 minutes, generates its own simulated data):
 
 ```bash
-# Tetraploid (2 subgenomes)
---kmers SP1.fasta SP2.fasta --labels SP1 SP2
-
-# Hexaploid (3 subgenomes)
---kmers SP1.fasta SP2.fasta SP3.fasta --labels SP1 SP2 SP3
-
-# Octoploid (4 subgenomes)
---kmers A.fasta B.fasta C.fasta D.fasta --labels A B C D
+bash tests/run_test.sh ./_selftest      # last line should be: ALL CHECKS PASSED
 ```
 
-**Important:** The label values in `--labels` must exactly match the ancestry labels (4th column, uppercase) in the gene ancestry mapping file (`-a`).
+---
+
+## Three steps to a result
+
+### 1. Fill in one configuration file
+
+```bash
+cp config.template.ini config.ini
+# edit the five inputs under [inputs]; declare samples under [samples] at the end
+```
+
+The five inputs are the only things the pipeline needs to know about your data:
+
+| Key | What it is | Format | Where it comes from |
+|---|---|---|---|
+| `genome` | Genome FASTA | one file, any species | your assembly |
+| `gff` | GFF3 annotation | at least `gene` lines with `ID=` | your annotation |
+| `clusters` | Homeologous-copy clusters | `ClusterID <TAB> gene1,gene2,...` | your copy-grouping tool (e.g. PolyAllele) |
+| `ancestry` | Gene to lineage assignment | a header with an `Ancestry`/`Lineage` column, or two columns (gene, lineage) | subgenome annotation |
+| `samples` | Sample sheet | `sample r1 r2 bam peaks`, missing values written as `-` | your data |
+
+Set `ploidy` to match the biology: `allo` (allopolyploid, lineage layer produced),
+`auto` (autopolyploid, no lineage layer), or `diploid` (two-haplotype reference,
+2 copies per cluster). See [docs/02_ploidy_modes.md](docs/02_ploidy_modes.md).
+
+### 2. Validate, do not guess
+
+```bash
+python run_atacquant.py --config config.ini --check
+```
+
+`--check` validates every path, every required tool and the bowtie2 index, then prints
+the exact plan and the exact command line it would run. It returns before touching the
+filesystem, so it is safe to run on a login node. `--dry-run` prints the commands
+without executing the steps.
+
+### 3. Run
+
+```bash
+python run_atacquant.py --config config.ini          # checkpoint resume is automatic
+```
+
+Interrupted? Run the same command again: completed steps are recorded in
+`.checkpoints/` and skipped. On a scheduler, edit `run_atacquant.pbs` and `qsub` it.
 
 ---
 
-## Citation
+## What you get (under `outdir/`)
 
-Manuscript in preparation. Please check back for the citation once the paper is published.
+| Location | Content |
+|---|---|
+| `qc/qc_report.md` | **read this first**: mass balance, identifiability overview |
+| `features/features.tsv`, `groups.tsv` | The HRU feature table (element x copy) and the group table |
+| `quant/<sample>/<sample>.quant.tsv` | **the core result**: per-copy quantification (EM counts and evidence columns) |
+| `matrix/` | Four count matrices: feature, group, group x lineage, gene |
+| `stats/<sample>/` | Statistics layer: tier stratification, group-level tests, detection limits (MDD) |
+| `run_atacquant.log` | Master log, with a pointer to each step's own log |
+
+Per-sample convergence diagnostics live in `quant/<sample>/<sample>.quant_stats.json`
+(`em_iterations`, `em_converged`, `em_seconds`). Check `em_converged` before quoting
+bootstrap standard deviations.
 
 ---
 
-## License
+## Reading the result honestly
 
-This project is licensed under a **Non-Commercial Research License**.  
-Free to use for academic and research purposes only. Commercial use is strictly prohibited.  
-See the [LICENSE](./LICENSE) file for details.
+Copy-level numbers are not all equally trustworthy, and the pipeline reports enough to
+tell which is which:
+
+- a feature's `Resolved_Frac` says how much of its count is undisputed evidence;
+- the tier stratification puts each feature in a band by identifiability;
+- the detection limit (MDD) says how large a difference must be before it is
+  distinguishable from allocation noise.
+
+Practical rule of thumb: **across lineage >= 2x, within lineage >= 3-5x** before
+believing a copy-level difference. Below that, use the lineage-level summary, which is
+far more robust than any individual copy. Details in
+[docs/05_copy_level_statistics.md](docs/05_copy_level_statistics.md).
+
+---
+
+## Notes on this distribution
+
+- English-only and species-agnostic: no organism-specific values, paths or thresholds
+  are baked in, and no Chinese text remains anywhere in the package.
+- It carries the v4.4 duplicate-marking fix: duplicate marking always goes through
+  `samtools markdup` and the `sambamba` branch was removed. `sambamba markdup` is
+  tuned for ~10-20M read pairs and degrades badly past that; one 145M-pair library
+  ran for 62 hours without progress and had to be killed. `sambamba` is therefore no
+  longer a dependency.
+
+---
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/00_quickstart.md](docs/00_quickstart.md) | The short version: setup, inputs, run, FAQ |
+| [docs/01_from_peaks_to_copy_fractions.md](docs/01_from_peaks_to_copy_fractions.md) | Step by step from a peak to a copy fraction: the projection rule, the EM, the evidence columns |
+| [docs/02_ploidy_modes.md](docs/02_ploidy_modes.md) | `allo` / `auto` / `diploid`, what actually changes (less than you think) and what does not |
+| [docs/03_chip_seq_support.md](docs/03_chip_seq_support.md) | Running ChIP-seq instead of ATAC-seq: what changes, what to avoid |
+| [docs/04_performance_v4.md](docs/04_performance_v4.md) | What v4 changed, measured speedups, how to verify them |
+| [docs/05_copy_level_statistics.md](docs/05_copy_level_statistics.md) | The statistics layer: tiers, tie-aware group tests, MDD, and when not to use them |
+
+---
+
+## Command-line reference
+
+```
+python run_atacquant.py --config CONFIG [--check] [--dry-run] [--force]
+                        [--steps map,peaks,features,quant,matrix,qc]
+                        [--no-stats]
+```
+
+| Flag | Effect |
+|---|---|
+| `--check` | Validate inputs, tools and index; print the plan; run nothing and write nothing |
+| `--dry-run` | Print the commands that would be executed, do not execute them |
+| `--force` | Ignore checkpoints and redo the requested steps |
+| `--steps` | Run only the listed steps, in pipeline order |
+| `--no-stats` | Skip the statistics layer even if `[stats] run = true` |
+
+---
+
+## Layout of this package
+
+```
+config.template.ini     the only input definition (copy to config.ini)
+samples.template.tsv    sample-sheet format, if you prefer a separate file
+environment.yml         conda environment
+run_atacquant.py        entry point: validation, planning, orchestration
+atacquant_core.py       step dispatcher
+run_atacquant.pbs       PBS job template
+docs/                   the manual
+bin/                    00 map+call peaks, 01 consensus peaks, 02 features,
+                        03 quantify (EM), 04 matrices, 05 QC report
+lib/                    shared helpers (FASTA, GFF, clusters, ancestry, mock BAM)
+analysis/               statistics layer and bias diagnostics
+tests/                  self-test, simulator, ground-truth evaluation, benchmark
+```
+
+---
+
+## Honest boundaries
+
+Stated up front, because they decide which conclusions the data can support:
+
+1. **Copy-level resolution has a floor.** Copies that differ by less than the
+   detection limit are, for practical purposes, one number. The MDD column tells you
+   where that floor is for each feature; it is not optional reading.
+2. **`projected` features are inferred, not observed.** They have no peak of their
+   own; they exist because a homeologous copy is expected there. They are marked, and
+   their detection rate is much lower than for `called` features.
+3. **Autopolyploids are much harder than allopolyploids.** Copy divergence of 0.1-1%
+   pushes the detection limit to 3-5x, and "subgenome dominance" is not even a
+   meaningful concept in that case. The pipeline says so rather than producing a
+   plausible-looking deconvolution.
+4. **A consensus/haploid reference makes deconvolution impossible.** If every gene
+   appears once in the reference, there is nothing to split. The pipeline detects this
+   (nearly all clusters are singletons) and warns explicitly instead of returning a
+   result that looks like deconvolution but is just peak counting.

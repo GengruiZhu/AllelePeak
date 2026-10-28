@@ -1,0 +1,31 @@
+#!/bin/bash
+#PBS -N ATACQuant
+#PBS -l nodes=1:ppn=48
+#PBS -q comput
+## Adjust to the memory actually available on your node (step 03 benefits from >= 150 GB)
+##PBS -l mem=200gb
+## Consider setting an explicit walltime; step 03 on a large genome takes many hours
+##PBS -l walltime=72:00:00
+#PBS -o atacquant.log
+#PBS -j oe
+
+cd "$PBS_O_WORKDIR" || exit 1
+date -R
+set -e
+
+# Activate the environment that has python>=3.7, numpy and pysam; when mapping from
+# FASTQ it also needs bowtie2, samtools, deeptools and macs2.
+# `source activate <env>` sometimes fails in a non-interactive batch shell; if so, use:
+#   export PATH=/path/to/conda/envs/<env>/bin:$PATH
+# source activate atacquant
+
+# Point this at your configuration file
+CONFIG=config.ini
+
+echo "===== self-test (optional, 1-3 minutes) ====="
+bash tests/run_test.sh ./_selftest
+
+echo "===== main run (config: $CONFIG) ====="
+python run_atacquant.py --config "$CONFIG"
+
+date -R

@@ -1,0 +1,4 @@
+version: 4.3.0
+package: ATACQuant
+mode: species-agnostic, English-only distribution
+date: 2026-10-27

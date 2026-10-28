@@ -1,16 +1,23 @@
 name: atacquant
 channels:
-  - bioconda
   - conda-forge
+  - bioconda
   - defaults
 dependencies:
-  - python>=3.8
-  - biopython>=1.79
-  - pysam>=0.19
-  - bowtie2>=2.4
-  - samtools>=1.15
-  - bedtools>=2.30
-  - sambamba>=0.8
-  - deeptools>=3.5
-  - macs2>=2.2
-  - pip
+  - python=3.9
+  - numpy>=1.17
+  - pysam>=0.16
+  # ---- needed only when you map from FASTQ and call peaks (skip if you reuse existing BAM + peaks) ----
+  - bioconda::bowtie2
+  - bioconda::samtools
+  - bioconda::deeptools      # alignmentSieve --ATACshift
+  - bioconda::macs2
+# Notes:
+#   - No biopython, no bedtools, and no repeat-masked genome are required.
+#   - Duplicate marking is done with `samtools markdup` only. The former sambamba
+#     path was removed on purpose: sambamba markdup is tuned for ~10-20M read pairs
+#     and degrades badly beyond that (one 145M-pair library ran for 62 hours with no
+#     progress and had to be killed), so sambamba is not a dependency any more.
+#   - Step 03 keeps its scratch files under tmpdir. For a ~10 Gb genome with
+#     ~140 million read pairs, expect several tens of GB of scratch space,
+#     depending on how multi-mapping the library is.
